@@ -18,10 +18,6 @@ import (
 	"github.com/jpillora/backoff"
 )
 
-// DefaultRetryTime is the default waiting time
-// in seconds between rate-limited requests.
-const DefaultRetryTime = 30
-
 // Client expose the methods callable on Nessus Api
 type Client interface {
 	GetScanTemplates() ([]*ScanTemplate, error)
@@ -332,10 +328,11 @@ func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interf
 	// Restore it to its original state.
 	req.Body = ioutil.NopCloser(bytes.NewBuffer(reqBodyBytes))
 
+	c.auth.AddAuthHeaders(req)
+
 	var res *http.Response
 	// Try 10 times then return an error.
 	for i := 0; i < 10; i++ {
-		c.auth.AddAuthHeaders(req)
 		res, err := c.httpClient.Do(req)
 		if err != nil {
 			return errors.New("Failed call: " + err.Error())
@@ -346,26 +343,6 @@ func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interf
 				log.Printf("Error when closing response body: %v", errC)
 			}
 		}(res.Body)
-
-		// Honoring rate limits:
-		// https://cloud.tenable.com/api#/ratelimiting
-		if res.StatusCode == http.StatusTooManyRequests {
-			var err error
-			var retryTime int
-			retryAfter := res.Header.Get("retry-after")
-			if retryAfter != "" {
-				retryTime, err = strconv.Atoi(retryAfter)
-				if err != nil {
-					log.Printf("Error when parsing \"retry-after\" header: %v", err)
-				}
-			} else {
-				retryTime = DefaultRetryTime
-			}
-
-			log.Printf("Rate limit reached, trying again in %v seconds", retryTime)
-			time.Sleep(time.Duration(retryTime) * time.Second)
-			continue
-		}
 
 		// We capture all non-2XX codes the same as the Tenable.io API returns
 		// unexpected error codes in response to internal errors, such as 404
@@ -382,12 +359,29 @@ func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interf
 			log.Printf("Response status code: %v", res.StatusCode)
 			log.Printf("Response body: %v", string(buf))
 
-			d := b.Duration()
-			log.Printf(
-				"Unpexpected status code: %v, trying again in %v",
-				res.StatusCode, d,
-			)
-			time.Sleep(d)
+			waitTime := b.Duration()
+
+			// Honoring rate limits:
+			// https://cloud.tenable.com/api#/ratelimiting
+			if res.StatusCode == http.StatusTooManyRequests {
+				retryAfter := res.Header.Get("retry-after")
+				if retryAfter != "" {
+					retryAfterInt, err := strconv.Atoi(retryAfter)
+					if err != nil {
+						log.Printf("Error when parsing \"retry-after\" header: %v", err)
+					} else {
+						waitTime = time.Duration(retryAfterInt) * time.Second
+					}
+				}
+				log.Printf("Rate limit exceeded, trying again in %v", waitTime)
+			} else {
+				log.Printf(
+					"Unpexpected status code: %v, trying again in %v",
+					res.StatusCode, waitTime,
+				)
+			}
+
+			time.Sleep(waitTime)
 			continue
 		}
 
