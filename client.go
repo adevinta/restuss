@@ -19,7 +19,7 @@ import (
 )
 
 // DefaultRetryTime is the default waiting time
-// in seconds between rate-limited requests
+// in seconds between rate-limited requests.
 const DefaultRetryTime = 30
 
 // Client expose the methods callable on Nessus Api
@@ -310,7 +310,7 @@ func (c *NessusClient) GetPolicyByIDContext(ctx context.Context, ID int64) (*Pol
 func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interface{}) error {
 	// We implement backoff in all requests as the Tenable.io API
 	// is returning non-successful status codes inconsistently
-	// and it returns 500 errors to "try again later"
+	// and it returns 500 errors to "try again later".
 	b := &backoff.Backoff{
 		Min:    100 * time.Millisecond,
 		Max:    60 * time.Second,
@@ -320,7 +320,7 @@ func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interf
 
 	rand.Seed(time.Now().UnixNano())
 
-	// Backup the io.ReadCloser to its original state for printing
+	// Copy the response body for logging.
 	var err error
 	var reqBodyBytes []byte
 	if req.Body != nil {
@@ -329,11 +329,11 @@ func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interf
 			return errors.New("Failed to read request body: " + err.Error())
 		}
 	}
-	// Restore it to its original state
+	// Restore it to its original state.
 	req.Body = ioutil.NopCloser(bytes.NewBuffer(reqBodyBytes))
 
 	var res *http.Response
-	// Try 10 times then return an error
+	// Try 10 times then return an error.
 	for i := 0; i < 10; i++ {
 		c.auth.AddAuthHeaders(req)
 		res, err := c.httpClient.Do(req)
@@ -371,7 +371,7 @@ func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interf
 		// unexpected error codes in response to internal errors, such as 404
 		// when a scan is incorrectly created on their end, unexpected 403
 		// when retrieving the status of a scan or apparently intended 500
-		// when an unknown request limit is exceeded
+		// when an unknown request limit is exceeded.
 		if res.StatusCode >= 300 {
 			log.Printf("Request URL: %v", req.URL)
 			log.Printf("Request body: %v", string(reqBodyBytes))
