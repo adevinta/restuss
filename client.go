@@ -18,6 +18,10 @@ import (
 	"github.com/jpillora/backoff"
 )
 
+// DefaultRetryTime is the default waiting time
+// in seconds between rate-limited requests
+const DefaultRetryTime = 30
+
 // Client expose the methods callable on Nessus Api
 type Client interface {
 	GetScanTemplates() ([]*ScanTemplate, error)
@@ -345,17 +349,17 @@ func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interf
 
 		// Honoring rate limits:
 		// https://cloud.tenable.com/api#/ratelimiting
-		if res.StatusCode == 429 {
+		if res.StatusCode == http.StatusTooManyRequests {
 			var err error
 			var retryTime int
 			retryAfter := res.Header.Get("retry-after")
 			if retryAfter != "" {
 				retryTime, err = strconv.Atoi(retryAfter)
 				if err != nil {
-					log.Printf("Error when reading \"retry-after\" header: %v", err)
+					log.Printf("Error when parsing \"retry-after\" header: %v", err)
 				}
 			} else {
-				retryTime = 30
+				retryTime = DefaultRetryTime
 			}
 
 			log.Printf("Rate limit reached, trying again in %v seconds", retryTime)
@@ -384,7 +388,10 @@ func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interf
 				res.StatusCode, d,
 			)
 			time.Sleep(d)
+			continue
 		}
+
+		break
 	}
 
 	if data != nil {
