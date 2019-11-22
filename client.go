@@ -10,8 +10,12 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"strconv"
+	"time"
+
+	"github.com/jpillora/backoff"
 )
 
 // Client expose the methods callable on Nessus Api
@@ -299,27 +303,93 @@ func (c *NessusClient) GetPolicyByIDContext(ctx context.Context, ID int64) (*Pol
 	return p, nil
 }
 
-// TODO: add rate limit handling:
-// https://cloud.tenable.com/api#/ratelimiting
 func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interface{}) error {
-	var reqBodyBytes []byte
-	var err error
+	// We implement backoff in all requests as the Tenable.io API
+	// is returning non-successful status codes inconsistently
+	// and it returns 500 errors to "try again later".
+	b := &backoff.Backoff{
+		Min:    100 * time.Millisecond,
+		Max:    60 * time.Second,
+		Factor: 1.5,
+		Jitter: true,
+	}
 
+	rand.Seed(time.Now().UnixNano())
+
+	// Copy the response body for logging.
+	var err error
+	var reqBodyBytes []byte
 	if req.Body != nil {
 		reqBodyBytes, err = ioutil.ReadAll(req.Body)
 		if err != nil {
 			return errors.New("Failed to read request body: " + err.Error())
 		}
 	}
-
-	// Restore the io.ReadCloser to its original state
+	// Restore it to its original state.
 	req.Body = ioutil.NopCloser(bytes.NewBuffer(reqBodyBytes))
 
 	c.auth.AddAuthHeaders(req)
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return errors.New("Failed call: " + err.Error())
+
+	// Try 10 times then return an error.
+	success := false
+	var res *http.Response
+	for i := 0; i < 10; i++ {
+		res, err := c.httpClient.Do(req)
+		if err != nil {
+			return errors.New("Failed call: " + err.Error())
+		}
+
+		// We capture all non-2XX codes the same as the Tenable.io API returns
+		// unexpected error codes in response to internal errors, such as 404
+		// when a scan is incorrectly created on their end, unexpected 403
+		// when retrieving the status of a scan or apparently intended 500
+		// when an unknown request limit is exceeded.
+		if res.StatusCode >= 300 {
+			log.Printf("Request URL: %v", req.URL)
+			log.Printf("Request body: %v", string(reqBodyBytes))
+
+			buf, err := ioutil.ReadAll(res.Body)
+			if err != nil {
+				log.Printf("Error when reading response body: %v", err)
+			}
+			err = res.Body.Close()
+			if err != nil {
+				log.Printf("Error when closing response body: %v", err)
+			}
+
+			log.Printf("Response status code: %v", res.StatusCode)
+			log.Printf("Response body: %v", string(buf))
+
+			waitTime := b.Duration()
+
+			// Honoring rate limits:
+			// https://cloud.tenable.com/api#/ratelimiting
+			if res.StatusCode == http.StatusTooManyRequests {
+				retryAfter := res.Header.Get("retry-after")
+				if retryAfter != "" {
+					retryAfterInt, err := strconv.Atoi(retryAfter)
+					if err != nil {
+						log.Printf("Error when parsing \"retry-after\" header: %v", err)
+					} else {
+						waitTime = time.Duration(retryAfterInt) * time.Second
+					}
+				}
+				log.Printf("Rate limit exceeded, trying again in %v", waitTime)
+			} else {
+				log.Printf(
+					"Unpexpected status code: %v, trying again in %v",
+					res.StatusCode, waitTime,
+				)
+			}
+
+			time.Sleep(waitTime)
+			continue
+		}
+
+		success = true
+		break
 	}
+
 	defer func(body io.ReadCloser) {
 		errC := body.Close()
 		if errC != nil {
@@ -327,17 +397,8 @@ func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interf
 		}
 	}(res.Body)
 
-	if res.StatusCode > 299 {
-		log.Printf("Request URL: %v", req.URL)
-		log.Printf("Request body: %v", string(reqBodyBytes))
-		buf, err := ioutil.ReadAll(res.Body)
-		if err != nil {
-			log.Printf("Error when reading response body: %v", err)
-		}
-		log.Printf("Response status code: %v", res.StatusCode)
-		log.Printf("Response body: %v", string(buf))
-
-		return errors.New("Call failed, status code: " + strconv.Itoa(res.StatusCode))
+	if !success {
+		return errors.New("Retry limit exceeded")
 	}
 
 	if data != nil {
@@ -348,5 +409,6 @@ func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interf
 			return errors.New("Failed to read the response: " + err.Error())
 		}
 	}
+
 	return nil
 }
