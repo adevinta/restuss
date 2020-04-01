@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
 	"math/rand"
@@ -334,7 +333,7 @@ func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interf
 	success := false
 	var res *http.Response
 	for i := 0; i < 10; i++ {
-		res, err := c.httpClient.Do(req)
+		res, err = c.httpClient.Do(req)
 		if err != nil {
 			return errors.New("Failed call: " + err.Error())
 		}
@@ -390,12 +389,14 @@ func (c *NessusClient) performCallAndReadResponse(req *http.Request, data interf
 		break
 	}
 
-	defer func(body io.ReadCloser) {
-		errC := body.Close()
-		if errC != nil {
-			log.Printf("Error when closing response body: %v", errC)
+	defer func(res *http.Response) {
+		if res != nil && res.Body != nil {
+			errC := res.Body.Close()
+			if errC != nil {
+				log.Printf("Error when closing response body: %v", errC)
+			}
 		}
-	}(res.Body)
+	}(res)
 
 	if !success {
 		return errors.New("Retry limit exceeded")
